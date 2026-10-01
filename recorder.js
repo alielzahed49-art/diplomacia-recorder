@@ -1,11 +1,29 @@
-// Diplomacia request recorder — بيسجل طلبات الموقع الرسمي ويبعتها لسيرفر البوت (من غير التوكن)
+// ==UserScript==
+// @name         Diplomacia Recorder
+// @namespace    diplomacia-recorder
+// @version      1.1
+// @description  Records the official Diplomacia client requests (no tokens) and sends them to the bot server
+// @match        https://diplomacia.com.tr/*
+// @match        https://*.diplomacia.com.tr/*
+// @run-at       document-start
+// @grant        none
+// ==/UserScript==
 (function(){
   if(location.hostname.indexOf('diplomacia.com.tr')<0)return;
   if(window.__dcap)return; window.__dcap=1;
   var ENDPOINT='https://diplomaciabot-9swm.onrender.com/api/capture', SESSION=Math.random().toString(36).slice(2,10);
   var KEY=''; try{KEY=localStorage.getItem('dcap_key')||'';}catch(e){}
-  if(!KEY){KEY=(window.prompt('Recorder key (من لوحة الأدمن):')||'').trim(); try{if(KEY)localStorage.setItem('dcap_key',KEY);}catch(e){}}
-  if(!KEY)return;
+  function ensureKey(){
+    if(KEY)return true;
+    KEY=(window.prompt('Recorder key (من لوحة الأدمن):')||'').trim();
+    try{if(KEY)localStorage.setItem('dcap_key',KEY);}catch(e){}
+    return !!KEY;
+  }
+  // السؤال عن المفتاح بيتأجل لحد ما الصفحة تحمل (السكربت بيشتغل في بداية التحميل عشان يمسك أول الطلبات)
+  if(!KEY){
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',function(){setTimeout(ensureKey,1500);});
+    else setTimeout(ensureKey,1500);
+  }
   var buf=[], seen={}, wsCount={}, st={cap:0,sent:0,fail:0,msg:'●'};
   var badge=document.createElement('div');
   badge.style.cssText='position:fixed;left:6px;bottom:6px;z-index:2147483647;font:10px monospace;background:rgba(0,0,0,.65);color:#7f7;padding:2px 6px;border-radius:6px;pointer-events:none';
@@ -22,6 +40,7 @@
   var of=window.fetch;
   function flush(){
     if(!buf.length)return;
+    if(!KEY){if(buf.length>200)buf=buf.slice(-200);return;}
     var b=buf; buf=[];
     of.call(window,ENDPOINT,{method:'POST',keepalive:true,headers:{'Content-Type':'text/plain'},body:JSON.stringify({key:KEY,session:SESSION,ua:navigator.userAgent.slice(0,90),page:location.pathname,events:b})})
       .then(function(r){
