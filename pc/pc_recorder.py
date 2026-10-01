@@ -99,6 +99,46 @@ class Sender:
             print('  ! send failed (%s) - kept locally in captures.jsonl' % e)
 
 
+def find_chrome():
+    """Real installed Chrome/Edge (Google refuses sign-in inside Playwright's own browser)."""
+    c = []
+    for env in ('ProgramFiles', 'ProgramFiles(x86)', 'LOCALAPPDATA'):
+        base = os.environ.get(env)
+        if base:
+            c.append(os.path.join(base, 'Google', 'Chrome', 'Application', 'chrome.exe'))
+    for env in ('ProgramFiles(x86)', 'ProgramFiles'):
+        base = os.environ.get(env)
+        if base:
+            c.append(os.path.join(base, 'Microsoft', 'Edge', 'Application', 'msedge.exe'))
+    c += ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome',
+          '/usr/bin/chromium', '/usr/bin/chromium-browser']
+    for p in c:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def start_real_chrome(path, port, site, headless=False):
+    """Launch plain Chrome with a remote-debugging port (no automation flags) and wait until it answers."""
+    import subprocess
+    args = [path, '--remote-debugging-port=%d' % port, '--user-data-dir=' + os.path.join(HERE, 'chrome-profile'),
+            '--no-first-run', '--no-default-browser-check']
+    if hasattr(os, 'geteuid') and os.geteuid() == 0:
+        args.append('--no-sandbox')  # Chrome refuses to start as root on Linux without it
+    if headless:
+        args.append('--headless=new')
+    args.append(site)
+    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(60):
+        try:
+            urllib.request.urlopen('http://127.0.0.1:%d/json/version' % port, timeout=1).read()
+            return proc
+        except Exception:
+            time.sleep(0.5)
+    proc.terminate()
+    raise RuntimeError('Chrome did not start with the debugging port')
+
+
 def check_key(endpoint, key):
     """Send an empty batch: 200 = key accepted, 403 = wrong key."""
     body = json.dumps({'key': key, 'session': 'check', 'ua': 'pc-recorder', 'page': 'pc', 'events': []}).encode()
@@ -118,6 +158,8 @@ def main():
     ap.add_argument('--endpoint', default=ENDPOINT)
     ap.add_argument('--site', default=SITE)
     ap.add_argument('--headless', action='store_true')
+    ap.add_argument('--playwright-browser', action='store_true', help='use Playwright\'s own Chromium (Google sign-in will be blocked there)')
+    ap.add_argument('--port', type=int, default=9222)
     ap.add_argument('--chromium-path', help='مسار متصفح Chromium لو عايز تستخدم متصفح مثبت عندك')
     a = ap.parse_args()
 
@@ -155,9 +197,20 @@ def main():
         return re.sub(r'^https?://[^/]+', '', url)[:200]
 
     with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(os.path.join(HERE, 'profile'), headless=a.headless,
-                                                   viewport=None, args=['--start-maximized'],
-                                                   executable_path=a.chromium_path or None)
+        proc = None
+        if a.playwright_browser:
+            ctx = p.chromium.launch_persistent_context(os.path.join(HERE, 'profile'), headless=a.headless,
+                                                       viewport=None, args=['--start-maximized'],
+                                                       executable_path=a.chromium_path or None)
+        else:
+            chrome = a.chromium_path or find_chrome()
+            if not chrome:
+                print('Chrome/Edge not found. Install Chrome, or pass --chromium-path "C:\\path\\to\\chrome.exe".')
+                return 1
+            print('Starting your real browser: %s' % chrome)
+            proc = start_real_chrome(chrome, a.port, a.site, a.headless)
+            browser = p.chromium.connect_over_cdp('http://127.0.0.1:%d' % a.port)
+            ctx = browser.contexts[0]
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
         def on_request(req):
@@ -267,7 +320,13 @@ def main():
                 sender.add({'t': int(time.time() * 1000), 'm': 'WSMSG', 'u': k, 's': 0, 'ms': 0, 'rb': '', 'sh': '',
                             'sa': '', 'len': n})
             sender.flush()
-            ctx.close()
+            try:
+                if proc is not None:
+                    browser.close()   # just disconnects; your Chrome window stays open
+                else:
+                    ctx.close()
+            except Exception:
+                pass
             print('Done. sent %d, failed %d. Local copy: captures.jsonl' % (sender.sent, sender.failed))
 
 
