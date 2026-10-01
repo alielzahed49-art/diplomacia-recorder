@@ -12,7 +12,7 @@ Diplomacia PC recorder — يفتح اللعبة في متصفح حقيقي (Chr
     python pc_recorder.py --key XXXX
 سجّل دخول في النافذة اللي هتفتح، العب عادي، وسيب السكربت شغال. Ctrl+C للإيقاف.
 """
-import argparse, json, os, re, signal, sys, threading, time, urllib.request, uuid
+import argparse, json, os, re, signal, sys, threading, time, urllib.error, urllib.request, uuid
 
 ENDPOINT = 'https://diplomaciabot-9swm.onrender.com/api/capture'
 SITE = 'https://diplomacia.com.tr'
@@ -96,7 +96,20 @@ class Sender:
             self.sent += len(batch)
         except Exception as e:
             self.failed += len(batch)
-            print('  ! فشل الإرسال للسيرفر (%s) — محفوظ محليًا في captures.jsonl' % e)
+            print('  ! send failed (%s) - kept locally in captures.jsonl' % e)
+
+
+def check_key(endpoint, key):
+    """Send an empty batch: 200 = key accepted, 403 = wrong key."""
+    body = json.dumps({'key': key, 'session': 'check', 'ua': 'pc-recorder', 'page': 'pc', 'events': []}).encode()
+    try:
+        req = urllib.request.Request(endpoint, data=body, headers={'Content-Type': 'application/json'})
+        urllib.request.urlopen(req, timeout=25).read()
+        return True, ''
+    except urllib.error.HTTPError as e:
+        return False, 'wrong key (HTTP %d)' % e.code if e.code == 403 else 'server error HTTP %d' % e.code
+    except Exception as e:
+        return None, 'cannot reach server: %s' % e
 
 
 def main():
@@ -109,12 +122,26 @@ def main():
     a = ap.parse_args()
 
     key_file = os.path.join(HERE, 'key.txt')
-    key = a.key
+    key = (a.key or '').strip()
     if not key and os.path.exists(key_file):
         key = open(key_file).read().strip()
-    if not key:
-        key = input('الصق مفتاح الالتقاط (من لوحة الأدمن → سكربت الطلبات): ').strip()
-    open(key_file, 'w').write(key)
+    for attempt in range(3):
+        if not key:
+            key = input('Paste the capture KEY (admin panel -> request recorder -> copy key): ').strip()
+        ok, why = check_key(a.endpoint, key)
+        if ok is False:
+            print('  X %s. The key is the long secret string, not a link.' % why)
+            key = ''
+            if os.path.exists(key_file):
+                os.remove(key_file)
+            continue
+        if ok is None:
+            print('  ! %s (will keep recording locally and retry sending)' % why)
+        open(key_file, 'w').write(key)
+        break
+    else:
+        print('Key still rejected - stopping.')
+        return 1
 
     from playwright.sync_api import sync_playwright
     sender = Sender(key, a.endpoint)
@@ -214,8 +241,8 @@ def main():
         ctx.on('page', lambda pg: pg.on('websocket', on_ws))
 
         page.goto(a.site)
-        print('✅ شغّال. سجّل دخول والعب عادي. الجلسة: %s' % sender.session)
-        print('   Ctrl+C للإيقاف.')
+        print('OK recording. Log in to the game and play normally. Session: %s' % sender.session)
+        print('   Press Ctrl+C (or close the browser) to stop.')
         # مهم: في وضع Playwright المتزامن الأحداث بتتعالج بس أثناء استدعاءات Playwright نفسها،
         # فلازم نستخدم wait_for_timeout بدل time.sleep. Ctrl+C أو قفل المتصفح بيوقفوا السكربت.
         stop = {'v': False}
@@ -230,9 +257,9 @@ def main():
                 page.wait_for_timeout(1000)
                 if time.time() - last >= 15:
                     last = time.time()
-                    print('  … أُرسل %d حدث، فشل %d' % (sender.sent, sender.failed))
+                    print('  ... sent %d events, failed %d' % (sender.sent, sender.failed))
         except Exception:
-            print('المتصفح اتقفل — بنوقف.')
+            print('Browser closed - stopping.')
         finally:
             sender.flush()
             # ملخص WS
@@ -241,7 +268,7 @@ def main():
                             'sa': '', 'len': n})
             sender.flush()
             ctx.close()
-            print('تم. أُرسل %d، فشل %d. النسخة المحلية: captures.jsonl' % (sender.sent, sender.failed))
+            print('Done. sent %d, failed %d. Local copy: captures.jsonl' % (sender.sent, sender.failed))
 
 
 if __name__ == '__main__':
